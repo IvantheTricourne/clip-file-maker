@@ -2,7 +2,8 @@
   (:require
    [clojure.string :as str]
    [clojure.java.shell :as shell]
-   [jsonista.core :as j])
+   [jsonista.core :as j]
+   [clojure.java.io :as io])
   (:use seesaw.core)
   (:gen-class))
 
@@ -12,8 +13,9 @@
 
 (def ^:dynamic *timestamps* (atom []))
 (def ^:dynamic *start* (atom nil))
-(def timestamp-field (text :multi-line? true :text ""))
-(def info-field (text :editable? false :text "press start, then end to insert clip timestamps"))
+(def timestamp-field (text :multi-line? true))
+(def info-field (text :editable? false
+                      :text "press start, then end to insert clip timestamps"))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; util
@@ -49,25 +51,26 @@
 (defn run-vlc-status-command
   "Returns a parsed JSON object of VLC's status"
   [event]
-  (let [result (apply shell/sh get-vlc-status-command)]
-    (if-let [out (not-empty (:out result))]
+  (let [{:keys [exit out err]} (apply shell/sh get-vlc-status-command)]
+    (if (zero? exit)
       (j/read-value out)
-      (alert event (str "error getting timetsamp from vlc: " (:err result))))))
+      (alert event (str "error getting timetsamp from vlc: " err)))))
 
 (defn get-timestamp
   "Parse current timestamp from VLC's status"
   [event]
-  (let [status-map (run-vlc-status-command event)]
-    (-> status-map
-        (get "time")
-        (convert-to-timestamp))))
+  (let [timestamp (-> event
+                      (run-vlc-status-command)
+                      (get "time")
+                      (convert-to-timestamp))]
+    (text! info-field (str "timestamp: " timestamp))
+    timestamp))
 
 (defn start-handler
   "start button handler"
   [event]
   (let [current-timestamp (get-timestamp event)]
-    (reset! *start* current-timestamp)
-    (text! info-field (str "start: " current-timestamp))))
+    (reset! *start* current-timestamp)))
 
 (defn end-handler
   "end button handler"
@@ -79,9 +82,22 @@
         (do
           (swap! *timestamps* #(conj % start-end-string))
           (text! timestamp-field (str/join \newline @*timestamps*))
-          (reset! *start* nil)
-          (text! info-field (str "end: " end))))
+          (reset! *start* nil)))
       (alert event (str "<html>Pressed end button, without start.")))))
+
+(defn save-to-file
+  [event]
+  (let [timestamps @*timestamps*
+        output (io/file "clip-file")]
+    (binding [*out* (io/writer output)]
+      (println (str/join \newline timestamps)))
+    (text! info-field (str "clip file saved: " output))))
+
+(defn clear-clips
+  [event]
+  (reset! *timestamps* [])
+  (text! timestamp-field (str/join \newline @*timestamps*))
+  (text! info-field "cleared."))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; main
@@ -93,14 +109,22 @@
   (-> (frame
        :title "Clip File Maker"
        :on-close :exit
+       :menubar
+       (menubar :items
+                [(menu :text "File" :items [(action :handler save-to-file
+                                                    :name "Save")])
+                 (menu :text "Edit" :items [(action :handler clear-clips
+                                                    :name "Clear clips")])])
        :content
        (border-panel
         :border 10 :hgap 5 :vgap 20
         :center timestamp-field
-        :south (horizontal-panel
+        :south (vertical-panel
                 :items
                 [info-field
-                 (button :text "start" :listen [:action start-handler])
-                 (button :text "end" :listen [:action end-handler])])))
+                 (horizontal-panel
+                  :items
+                  [(button :text "start" :listen [:action start-handler])
+                   (button :text "end" :listen [:action end-handler])])])))
       pack!
       show!))
